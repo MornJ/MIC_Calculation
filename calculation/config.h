@@ -43,7 +43,7 @@ typedef unsigned int word_t;          /* word - 32 bits */
 
 #define CORRECT_RETIRE_BUF_SIZE 64
 
-#define NUM_PROCS 24
+#define NUM_PROCS 8
 #define MAX_TRIFS_TRACE_BUF_BLOCK_SIZE (64)
 #define MAX_TRIFS_TRACE_BUF_SIZE (128)
 #define MAX_TRIFS_TRACE_TB_INST_NUM (100)

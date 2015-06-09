@@ -51,7 +51,7 @@ END_LEGAL */
 #include <sys/time.h>
 struct timeval starttime, endtime;
 pthread_mutex_t ea_mutex;
-INT32 numThreads = 0;
+UINT32 numThreads = 0;
 
 using namespace std;
 //easton added
@@ -85,6 +85,7 @@ public:
 
 struct thread_data_t {
 	struct mem_ref *mem_buf;
+    UINT64 total_inst_num;
 	map< ADDRINT, vector< instr_info_buffer_t > > * bb_cache_map;
 	x86_tb_instr_buffer_t *last_tb;
 	vector< x86_inst_t >* last_tb_inst;
@@ -271,6 +272,7 @@ void bbl_callback(THREADID threadid, ADDRINT first_inst_addr, ADDRINT last_inst_
 				  vector< x86_inst_t >* tb_inst) {
 #if 1
 	struct thread_data_t* thread_data = (struct thread_data_t*)PIN_GetThreadData(buf_key, threadid);
+    thread_data->total_inst_num += bbl_numinst;
 	if(thread_data->first_tb_flag) {
 		thread_data->first_tb_flag = 0;
 	} else {
@@ -335,8 +337,7 @@ void bbl_callback(THREADID threadid, ADDRINT first_inst_addr, ADDRINT last_inst_
 			}
 */
 			do_cal(threadid, entries);
-		} 
-		else {
+		} else {
 			vector< instr_info_buffer_t > *uops = &(*local_bb_map)[last_tb_addr];
 			for(unsigned int i = 0; i < uops->size(); i++) {
 				byte_t futype_tmp = (*uops)[i].m_futype;
@@ -367,12 +368,12 @@ void bbl_callback(THREADID threadid, ADDRINT first_inst_addr, ADDRINT last_inst_
 	PIN_SetThreadData(buf_key, thread_data, threadid);
 }
 
+// static UINT64 icount = 0;
 // Pin calls this function every time a new basic block is encountered
 // It inserts a call to docount
 VOID Trace(TRACE trace, VOID *v) {
 	// Visit every basic block  in the trace
 	for(BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
-
 #if 1
 		BBL_InsertCall(bbl, IPOINT_ANYWHERE, AFUNPTR(bbl_callback),
 					   IARG_THREAD_ID,
@@ -389,7 +390,6 @@ VOID Trace(TRACE trace, VOID *v) {
 			ADDRINT address = INS_Address(ins);
 			//if(ins_str.compare("nop ") == 0)
 			//	cout << ins_str << endl;
-
 			if(ins_str.compare("nop ") != 0) {
 				if(count_nop >= 8) {
 					if(am_i_in_magicbreak == false) {
@@ -452,10 +452,10 @@ VOID ThreadStart(THREADID threadid, CONTEXT *ctxt, INT32 flags, VOID *v) {
 	numThreads++;
 	easton_ins_num.push_back(0);
 	ReleaseLock(&lock);
-
 	struct thread_data_t *thread_data = (struct thread_data_t*)malloc(sizeof(struct thread_data_t));
 	struct mem_ref* mem_buf = (struct mem_ref*)PIN_GetBufferPointer(ctxt, bufId);
 	thread_data->mem_buf = mem_buf;
+    thread_data->total_inst_num = 0;
 	thread_data->bb_cache_map = new map< ADDRINT, vector< instr_info_buffer_t > >();
 	thread_data->last_tb = (x86_tb_instr_buffer_t*)malloc(sizeof(x86_tb_instr_buffer_t));
 	thread_data->first_tb_flag = 1;
@@ -475,6 +475,15 @@ VOID Fini(INT32 code, VOID *v) {
 //#endif
 	// Write to a file since cout and cerr maybe closed by the application
 	OutFile.setf(ios::showbase);
+
+    UINT64 total_inst_num_sum = 0;
+    for(UINT32 t = 0; t < numThreads; t++){
+        struct thread_data_t* thread_data = (struct thread_data_t*)PIN_GetThreadData(buf_key, t);
+        total_inst_num_sum += thread_data->total_inst_num;
+        //OutFile << "Thread[" << t <<"] total_inst_num = "<<thread_data->total_inst_num<<endl;
+    } 
+    cout << "[Calculation-based simulator]-Total x86 Instructions: "<< total_inst_num_sum<<endl;
+
 	OutFile << "Count " << icount << endl;
 	OutFile << "num_bb " << num_bb << endl;
 	OutFile << "num_last_instr " << num_last_instr << endl;
@@ -492,7 +501,6 @@ VOID Fini(INT32 code, VOID *v) {
 /* ===================================================================== */
 /* Print Help Message                                                    */
 /* ===================================================================== */
-
 INT32 Usage() {
 	cerr << "This tool counts the number of dynamic instructions executed" << endl;
 	cerr << endl << KNOB_BASE::StringKnobSummary() << endl;

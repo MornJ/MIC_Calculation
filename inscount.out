@@ -1,0 +1,20 @@
+
+[Calculation-based simulator]-Wait_Number: 	11701035	8569056	8566938	8568395	8570328	0	0	0
+[Calculation-based simulator]-Instructions: 	58557438	39567627	38152815	38268995	40862080	0	0	0
+[Calculation-based simulator]-Total instructions 215408955
+[Calculation-based simulator]-Cycles: 	52463557	64206896	63633053	64922657	65635262	0	0	0
+[Calculation-based simulator]-Branches: Total 35013311 Mispred 15051886 Mispred-Percentage 42.989
+[Calculation-based simulator]-Caches: L1-I hit 0 miss 0 L1-D hit 170475470 miss 888040 L2 hit 887600 miss 440
+[Calculation-based simulator] Simulation terminates.
+[Calculation-based simulator] Goodbye.
+Count 0
+num_bb 0
+num_last_instr 0
+num_fetch_inst 0
+num_tb_mem_diff 0
+num_transfer_instr 0
+bb_cache_map size 0
+num_reads 0 num_writes 0
+num buffer full 0
+num missed mem 0
+test addr 0

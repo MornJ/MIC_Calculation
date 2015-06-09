@@ -5,3 +5,4 @@ obj-intel64/*
 *.o
 result
 scripts
+output

@@ -1,16 +1,16 @@
 
 #CC = /home/minqh/gcc-3.4.6/bin/g++
-CC = g++
+CC = icpc
 #OPT_FLAGS = -march=i686
 OPT_FLAGS = -march=x86-64
  
-OPT_FLAGS += -g -ggdb -g3
+OPT_FLAGS += -g -ggdb -g3 -mmic
  
 #OPT_FLAGS += -O2 -finline-functions -DNO_VECTOR_BOUNDS_CHECKS -DMULTIFACET_NO_OPT_WARN
  
 OPT_FLAGS += -fpic -finline-functions
 
-OPT_FLAGS += -ldecode
+OPT_FLAGS += 
 
 #LIBS=-Ldecoder -ldecode
 
@@ -40,7 +40,7 @@ module:
 	$(CC) $(OPT_FLAGS) -g -c yags.c -o $(OBJ_DIR)/yags.o
 	$(CC) $(OPT_FLAGS) -g -c calculation.c -o $(OBJ_DIR)/calculation.o -lpthread -lscif
 	$(CC) $(OPT_FLAGS) -g -c trans_cache.c -o $(OBJ_DIR)/trans_cache.o
-	$(CC) $(OPT_FLAGS) -g -shared -o opal.so $(OBJ) -lpthread -lscif
+	$(CC) $(OPT_FLAGS) -g -o cal_server $(OBJ) -lpthread -lscif
 
 	@echo "Finished."
 

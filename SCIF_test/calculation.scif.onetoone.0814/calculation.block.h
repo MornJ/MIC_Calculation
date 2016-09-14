@@ -19,7 +19,6 @@
 #include <scif.h>
 #include "yags.h"
 #include "config.h"
-#include "pin.H"
 
 #ifdef TRANSFORMER_INORDER_CACHE
 #include "trans_cache.h"
@@ -81,52 +80,9 @@ typedef struct instr_info_buffer_s{
     /// memory access size
     //byte_t m_access_size;
     /// physical address for the memory access address
-    uint32_t m_physical_addr;
-    uint32_t no;
+    uint64_t m_physical_addr;
 }instr_info_buffer_t;
 
-class x86_inst_t {
-public:
-	string inst;
-	ADDRINT addr;
-	vector< instr_info_buffer_t > uops;
-};
-struct thread_data_t {
-    int count;
-	struct mem_ref *mem_buf;
-    UINT64 total_inst_num;
-    UINT64 total_uop_num;
-	map< ADDRINT, vector< instr_info_buffer_t > > * bb_cache_map;
-    //bb_map_t** bb_cache_map;
-	x86_tb_instr_buffer_t *last_tb;
-	vector< x86_inst_t >* last_tb_inst;
-	int first_tb_flag;
-    THREADID threadid;
-    THREADID transfer_tid;
-    scif_epd_t epd;
-    /* remote buffer pointer */
-    void* remote_ptr;
-    double time;
-    double time2;
-    uint32_t entry_offset;
-    uint64_t queue_no;
-    /* latest remote queue that has been processed */
-    uint32_t remote_no;
-    /* the offset in current address queue, the unit is uint64_t */
-    uint32_t queue_offset;
-    instr_info_buffer_t* entries;
-    uint32_t* addr_queue;
-    uint64_t* p;
-    uint32_t* entries_num;
-
-};
-
-typedef struct transfer_data_s{
-    int threadid;
-    instr_info_buffer_t* buffer;
-    scif_epd_t epd;
-    void* remote_ptr;
-} transfer_data_t;
 
 typedef unsigned long long W64;
 typedef signed long long W64s;
@@ -1062,8 +1018,6 @@ public:
 };
 
 #endif
-VOID cal_buffer(VOID* vargp);
-void send_sig(THREADID pid, int core_num, vector< instr_info_buffer_t > *entries);
 
 class pseq_t {
 public:
@@ -1176,8 +1130,7 @@ public:
 
 	pseq_t( int id );
 	~pseq_t();
-	bool m_calculate(vector< instr_info_buffer_t > & entries, unsigned int& index);
-	bool TRANS_inorder_simpleLookupInstruction(instr_info_buffer_t * entry);
+	bool m_calculate(instr_info_buffer_t * entries, unsigned int& index, int length);
 	static bool trifs_trace_translate_uops(struct TransOp* uop,  instr_info_buffer_t* instr_info, uint64_t trifs_trace_virt_pc);
 	bool m_write_coherence_buffer(long long address, int type, long long cycle, int in_L2);
 	bool trifs_trace_translate_x86_inst_reset();
@@ -1204,9 +1157,14 @@ void zmf_init();
 
 void calculation_hello();
 
-void do_cal(int core_num, vector< instr_info_buffer_t > & entries);
+void do_cal(int core_num, instr_info_buffer_t *entries, int length);
 
-void print_result(ostream & OutFile);
+void* cal_buffer(void* vargp);
+void* listen_msg(void* vargp);
+
+//void send_sig(THREADID pid, int core_num, vector< instr_info_buffer_t > *entries);
+
+void print_result();
 
 #endif  /* __CALCULATION_H s*/
 

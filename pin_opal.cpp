@@ -36,7 +36,16 @@ END_LEGAL */
 #include <map>
 #include <vector>
 #include <numeric>
-
+#include <pthread.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <scif.h>
+#include <time.h>
 #include <set>
 #include <utility>
 #include "pin.H"
@@ -59,6 +68,24 @@ vector<long long> easton_ins_num;
 int count_nop = 0;
 bool am_i_in_magicbreak = false;
 extern long ins_count_between_magic;
+int queue_size = 100000;
+uint16_t *nodes;
+int buffer_size = 0;
+int thread_buffer_size = 0;
+int enttry_buffer_offset = 0;
+
+int len = 0;
+int t_num = 0;
+void** buffers;
+void** remote_ptrs;
+scif_epd_t* epds;
+
+
+typedef struct _bb_map_t{
+    ADDRINT last_tb_addr;
+    vector< instr_info_buffer_t >* entry;
+    struct _bb_map_t* next;
+} bb_map_t;
 
 
 extern "C" {
@@ -76,21 +103,6 @@ struct mem_ref {
 	int is_full;
 };
 
-class x86_inst_t {
-public:
-	string inst;
-	ADDRINT addr;
-	vector< instr_info_buffer_t > uops;
-};
-
-struct thread_data_t {
-	struct mem_ref *mem_buf;
-    UINT64 total_inst_num;
-	map< ADDRINT, vector< instr_info_buffer_t > > * bb_cache_map;
-	x86_tb_instr_buffer_t *last_tb;
-	vector< x86_inst_t >* last_tb_inst;
-	int first_tb_flag;
-};
 
 BUFFER_ID bufId;
 
@@ -242,7 +254,7 @@ VOID * BufferFull(BUFFER_ID id, THREADID threadid, const CONTEXT *ctxt, VOID *bu
 	struct thread_data_t *thread_data = (struct thread_data_t*)PIN_GetThreadData(buf_key, threadid);
 
 	thread_data->mem_buf = (struct mem_ref*)buf;
-
+    //cout << "buffer full" << endl;
 	PIN_SetThreadData(buf_key, thread_data, threadid);
 
 	return buf;
@@ -268,6 +280,32 @@ vector< x86_inst_t >* get_inst(BBL bbl) {
 	return result;
 }
 
+
+vector< instr_info_buffer_t >* find_entry(bb_map_t** local_bb_map, ADDRINT last_tb_addr){
+    int offset = last_tb_addr % 200;
+    bb_map_t* list = local_bb_map[offset];
+    while (list != NULL && list != 0){
+        if (list->last_tb_addr == last_tb_addr)
+            return list->entry;
+        else list = list->next;
+    }
+    return NULL;
+}
+
+//void send_sig(struct thread_data_t* thread_data, int core_num, vector< instr_info_buffer_t > *entries){
+//    //cout <<"before "<< entries->size() << endl;
+//    //if ((queue_out[core_num ]-1) %queue_size == queue_in[core_num] )
+//    //    cout<<" queue full "<<core_num<<endl;
+//    while ((queue_out[core_num ]-1) %queue_size == queue_in[core_num] )
+//        sleep(1);
+//    thread_data->entry_queue[queue_in[core_num]] = entries;
+//    queue_in[core_num] = (queue_in[core_num] +1) % queue_size;
+//    //cout <<"af "<< entries->size() << endl;
+//    //printf("send %d :%d %d\n",core_num, queue_out[core_num],queue_in[core_num]);
+//    //pthread_kill(pid, SIGUSER1);
+//
+//}
+
 void bbl_callback(THREADID threadid, ADDRINT first_inst_addr, ADDRINT last_inst_addr, uint32_t bbl_numinst,
 				  vector< x86_inst_t >* tb_inst) {
 #if 1
@@ -275,16 +313,30 @@ void bbl_callback(THREADID threadid, ADDRINT first_inst_addr, ADDRINT last_inst_
     thread_data->total_inst_num += bbl_numinst;
 	if(thread_data->first_tb_flag) {
 		thread_data->first_tb_flag = 0;
-	} else {
+	} else if (threadid != 0) {
 #if 1
+//        timespec st1, st2;
+//        clock_gettime(CLOCK_REALTIME, &st1);
+        if (thread_data->total_inst_num > thread_data->count*10000000){
+            thread_data->count++;
+            cout<<"thread "<<threadid<<"inst "<<thread_data->total_inst_num
+                <<endl;
+        }
+            int err = 0;
 		struct mem_ref *mem_buf = thread_data->mem_buf;
-		map< ADDRINT, vector< instr_info_buffer_t > > * local_bb_map = thread_data->bb_cache_map;
+        uint32_t* current_queue = (thread_data->addr_queue+ 
+                QUEUE_LENGTH* thread_data->queue_no);
+		map< ADDRINT, vector< instr_info_buffer_t > > * local_bb_map = 
+            thread_data->bb_cache_map;
 		ADDRINT last_tb_addr = thread_data->last_tb->tb_addr;
+        
 		if(local_bb_map->count(last_tb_addr) == 0) {
+        
+            //find slow
 			vector< x86_inst_t > * last_inst = thread_data->last_tb_inst;
 			struct TransOp trifs_trace_uops_buf[MAX_X86_UOP_NUM];
 			int num_uops;
-			vector< instr_info_buffer_t > entries;
+            vector< instr_info_buffer_t > entries;
 			unsigned char trifs_trace_x86_buf[MAX_TRIFS_TRACE_X86_BUF_SIZE];
 			for(unsigned int i = 0; i < last_inst->size(); i++) {
 				memset(trifs_trace_x86_buf, 0, MAX_TRIFS_TRACE_X86_BUF_SIZE);
@@ -307,11 +359,14 @@ void bbl_callback(THREADID threadid, ADDRINT first_inst_addr, ADDRINT last_inst_
 					pseq_t::trifs_trace_translate_uops(&trifs_trace_uops_buf[j],
 													   &entry, (*last_inst)[j].addr);
 
+//                    if (thread_data->entry_offset == 0) printf("thread ini %d %ld %ld \n", threadid, entry.logical_pc, entry.m_physical_addr);
 					if(entry.m_futype == FU_RDPORT || entry.m_futype == FU_WRPORT) {
 						entry.m_physical_addr = mem_buf->mem_addr;
+                        current_queue[thread_data->queue_offset+1] = 
+                            (uint32_t)(entry.m_physical_addr&0x0FFFFFFFF);
 						mem_buf++;
 					}
-
+                    
 					if(entry.m_futype == FU_BRANCH) {
 						entry.m_branch_result = NO_BRANCH;
 						if(first_inst_addr == entry.branch_taken_npc_pc) {
@@ -322,30 +377,57 @@ void bbl_callback(THREADID threadid, ADDRINT first_inst_addr, ADDRINT last_inst_
 						}
 					}
 					entries.push_back(entry);
+                    entry.no = thread_data->entry_offset;
+//                    if (entry.no == 0) 
+//                        printf("thread %d %ld %ld \n", threadid, 
+//                                entry.logical_pc, entry.m_physical_addr);
+                    current_queue[thread_data->queue_offset] = entry.no;
+                    thread_data->queue_offset += 2;
+                    thread_data->entries[thread_data->entry_offset] = entry;
+                    thread_data->entry_offset++;
 				}
 			}
             //push a new translation buffer into thread_data->bb_cache_map
+            //cout<<"entries "<<hex<<entries<<endl;
 			(*local_bb_map)[thread_data->last_tb->tb_addr] = entries;
-			//easton added the do_cal condition, to ensure only instructions between magicbreak is counted
-/*			
-			if(am_i_in_magicbreak) {
-#ifdef EA_TIMING
-				do_cal(threadid, entries);
-#else
-				easton_ins_num[threadid] += entries.size();
-#endif
-			}
-*/
-			do_cal(threadid, entries);
-		} else {
+//            *(thread_data->entries_num) += entries.size();
+            
+            int offset = thread_data->entry_offset - entries.size();
+            instr_info_buffer_t* r_p = (instr_info_buffer_t*)
+                ((char*)thread_data->remote_ptr + sizeof(uint32_t)*2*
+                THRESHOLD*QUEUE_SIZE+SIGNAL_NUM*4) + offset;
+            int l =  entries.size()*sizeof(instr_info_buffer_t);
+            if (offset > NEW_ENTRY) printf("offset overflow %d\n", offset);
+            if (l != 0){
+            if ((err = scif_writeto(thread_data->epd,(long)(thread_data->entries
+                                +offset), l, (long)r_p,0 )) <= 0){
+                if (err < 0){
+                    printf("scif_writeto entry failed with err %d in thread %d\n"
+                            , errno, threadid);
+                    fflush(stdout);
+                    exit(1);
+                }
+            }
+		    }
+        }else {
+            //find fast
 			vector< instr_info_buffer_t > *uops = &(*local_bb_map)[last_tb_addr];
+			//vector< instr_info_buffer_t > *uops = a;
+            
+            //cout<< "uops " << uops->size()<<" "<<uops<<" "<< hex << last_tb_addr<<endl;
 			for(unsigned int i = 0; i < uops->size(); i++) {
+//                thread_data->current_data.push_back((*uops)[i]);
 				byte_t futype_tmp = (*uops)[i].m_futype;
 				if(futype_tmp == FU_RDPORT || futype_tmp == FU_WRPORT) {
-					(*uops)[i].m_physical_addr = mem_buf->mem_addr;
+					//(*uops)[i].m_physical_addr = mem_buf->mem_addr;
+                    current_queue[thread_data->queue_offset+1] = 
+                        (uint32_t)(mem_buf->mem_addr & 0x0FFFFFFFF);
 					mem_buf++;
 				}
+                current_queue[thread_data->queue_offset] = (*uops)[i].no;
+                thread_data->queue_offset += 2;
 			}
+			//send_sig(thread_data, threadid/2, &(*local_bb_map)[last_tb_addr]);
 			//easton added the do_cal condition, to ensure only instructions between magicbreak is counted
 /*			
 			if(am_i_in_magicbreak) {
@@ -356,8 +438,61 @@ void bbl_callback(THREADID threadid, ADDRINT first_inst_addr, ADDRINT last_inst_
 #endif
 			}
 */
-			do_cal(threadid, (*local_bb_map)[thread_data->last_tb->tb_addr]);
 		}
+        if (threadid != 0 && thread_data->queue_offset/2 > THRESHOLD-150){
+            scif_epd_t epd = thread_data->epd;
+            
+            thread_data->total_uop_num += thread_data->queue_offset/2;
+            timespec t1, t2;
+            clock_gettime(CLOCK_REALTIME, &t1);
+            /* check if there is enough space to write next queue */
+            uint32_t* cur = (uint32_t*)(thread_data->p + 1);
+            uint32_t* remote_cur = (uint32_t *)thread_data->remote_ptr +2;
+//            timespec t1, t2;
+//            clock_gettime(CLOCK_REALTIME, &t1);
+            uint32_t chk = (thread_data->queue_no+1) % QUEUE_SIZE;
+            while (thread_data->remote_no == chk ){
+                if ((err = scif_readfrom(epd, (long)cur, sizeof(uint32_t), 
+                                (long)remote_cur,0 )) <= 0){
+                    if (err < 0){
+                        printf("scif_readfrom failed with err %d in thread %d\n"
+                                , errno, threadid);
+                        fflush(stdout);
+                        exit(1);
+                    }
+                }
+                thread_data->remote_no = *cur;
+            }
+            clock_gettime(CLOCK_REALTIME, &t2);
+            thread_data->time += t2.tv_sec * 1E9 - t1.tv_sec * 1E9 +
+                t2.tv_nsec- t1.tv_nsec;
+
+            /* write length to the first place of the address queue */
+            int length = thread_data->queue_offset * sizeof(uint32_t);
+            *current_queue = thread_data->queue_offset - 1;
+            int l = thread_data->queue_offset;
+//              printf("st %d %d %d\n",current_buffer[0],current_p[i],length);
+            uint32_t* remote_queue = (uint32_t*)thread_data->remote_ptr+
+                QUEUE_LENGTH*thread_data->queue_no+SIGNAL_NUM;
+            if ((err = scif_writeto(epd, (long)current_queue, 
+                            length, (long)remote_queue,0 )) <= 0){
+                if (err < 0){
+                    printf("scif_writeto queue failed with err %d\ 
+                            in thread %d\n", errno, threadid);
+                    fflush(stdout);
+                    exit(1);
+                }
+            }
+            scif_fence_signal(epd, 0, 0,(long)thread_data->remote_ptr, 
+                    thread_data->queue_no, SCIF_FENCE_INIT_SELF|SCIF_SIGNAL_REMOTE);
+            //int volatile *p = (int volatile *)senddata;
+            //while (*p != -1) usleep(10);
+            //thread_data->time2 += t1.tv_sec * 1E9 - t3.tv_sec * 1E9+t1.tv_nsec- t3.tv_nsec;
+            thread_data->queue_no = (thread_data->queue_no+1) % QUEUE_SIZE;
+            thread_data->queue_offset = 1;
+        }
+//        clock_gettime(CLOCK_REALTIME, &st2);
+//        thread_data->time2 += st2.tv_sec * 1E9 - st1.tv_sec * 1E9+st2.tv_nsec- st1.tv_nsec;
 #endif
 	}
 
@@ -445,22 +580,145 @@ VOID Trace(TRACE trace, VOID *v) {
 	}
 }
 
+void transfer(transfer_data_t* vargp){
+    int threadid = vargp->threadid;
+    char* buffer = (char*)(vargp->buffer);
+    
+    //pthread_detach(pthread_self());
+    int signo;
+    printf("bunch thread start %d\n", threadid);
+    scif_epd_t epd;
+    int req_pn;
+    int con_pn;
+    struct scif_portID portID;
+    int i, num_loops = 0, total_loop = 10;
+    char* senddata;
+    char* recvdata;
+    int msg_size;
+    int node, err;
+    int MIC_NUM = 1;
+    req_pn = 3000+threadid;
+    portID.node = threadid % MIC_NUM +1;
+    portID.port = 3000+(threadid/MIC_NUM + threadid % MIC_NUM );
+    //printf("Open the scif driver\n");
+    if ((epd = scif_open()) < 0){
+        printf("scif_open failed\n");
+        exit(1);
+
+    }
+   // printf("scif_bind to port 11\n");
+    if ((con_pn = scif_bind(epd,req_pn)) < 0){
+        printf("scif_bind failed with error %d\n",errno);
+        exit(2);
+    }
+    //printf("req_pn = %d\n",req_pn);
+retry:
+    if ((scif_connect(epd, &portID)) < 0){
+        if (ECONNREFUSED == errno){
+            printf("scif_connect failed with error %d retrying in thread %d\n", errno, threadid);
+        }
+        printf("scif_connect failed with error %d\n", errno);
+        exit(3);
+    }
+    instr_info_buffer_t* current_d = (instr_info_buffer_t*)buffer;
+    if (SCIF_REGISTER_FAILED == scif_register(epd, (void *)current_d, len, (off_t)current_d, SCIF_PROT_READ | SCIF_PROT_WRITE, SCIF_MAP_FIXED)){
+        printf("scif register failed in %d with error %d\n", threadid, errno);
+    }
+    void* remote_ptr;
+    if (err = scif_recv(epd, &remote_ptr, sizeof(void*), SCIF_RECV_BLOCK) <=0 ){
+        if (err < 0){
+            printf("scif_recv failed with err %d\n", errno);
+            fflush(stdout);
+            exit(1);
+        }
+    }   
+    scif_send(epd, &current_d, sizeof(void*), SCIF_SEND_BLOCK);
+    printf("cur %d %lx\n", threadid, current_d);
+    //printf("scif_connect success\n");
+    printf("ndoe = %d, port= %d\n", portID.node, portID.port);
+//    thread_data->current_data = current_d;
+    vargp->epd = epd;
+    vargp->remote_ptr = remote_ptr;
+    return;
+}
+
+
 //called when starting a new thread
 VOID ThreadStart(THREADID threadid, CONTEXT *ctxt, INT32 flags, VOID *v) {
 	//easton added
-	GetLock(&lock, threadid + 1);
-	numThreads++;
-	easton_ins_num.push_back(0);
-	ReleaseLock(&lock);
 	struct thread_data_t *thread_data = (struct thread_data_t*)malloc(sizeof(struct thread_data_t));
 	struct mem_ref* mem_buf = (struct mem_ref*)PIN_GetBufferPointer(ctxt, bufId);
+    thread_data->threadid = numThreads;
+	numThreads++;
+    printf("thread start %d\n", threadid);
+    thread_data->count = 1;
 	thread_data->mem_buf = mem_buf;
     thread_data->total_inst_num = 0;
 	thread_data->bb_cache_map = new map< ADDRINT, vector< instr_info_buffer_t > >();
+    //thread_data->bb_cache_map = (bb_map_t**)calloc(200,sizeof(bb_map_t*));
 	thread_data->last_tb = (x86_tb_instr_buffer_t*)malloc(sizeof(x86_tb_instr_buffer_t));
 	thread_data->first_tb_flag = 1;
+//    thread_data->current_data_size = 1;
+
+    thread_data->entry_offset = 0;
+    thread_data->queue_no = 0;
+    thread_data->queue_offset = 1;
+    thread_data->time = 0.0;
+    thread_data->time2 = 0.0;
+    thread_data->remote_no = QUEUE_SIZE-1;
+    if (threadid == 0) goto end;
+    int err;
+//    if ((err=pthread_sigmask(SIG_BLOCK, &sigmask, &oldmask)) != 0)
+//        printf("SIG BLOCK err");
+//    err = pthread_create(&(thread_data->pid), NULL, cal_buffer, (void*)threadid);
+
+    int bunch = (thread_data->threadid -1)/ TRANSFER_BUNCH;
+    int offset = (thread_data->threadid-1)% TRANSFER_BUNCH;
+    instr_info_buffer_t* current_d;
+    current_d = (instr_info_buffer_t*)((char*)(buffers[bunch]) + buffer_size*offset);
+    if (offset == 0){
+        //malloc the buffer region for TRANSFER_BUNCH threads
+        //len must be multiple of pagesize
+        //int len = (240+THRESHOLD)*sizeof(instr_info_buffer_t);
+        //cout << pagesize << " " << len << " "<<(long)current_d<<" "<<ret<<endl;
+        /* *p signal stand for the latest queue that the host had sent 
+         * Host will write to it 
+         * *P signal takes 64bit since fence signal is uint64_t
+         * |P|P|C|ThreadEntryNum|TransferEntryNum|WRT|AddrQueue...|Entries|*/
+        thread_data->p = (uint64_t*)current_d;
+
+        thread_data->addr_queue = (uint32_t*)current_d + SIGNAL_NUM;
+        thread_data-> entries= (instr_info_buffer_t*)((char*)current_d + 
+                sizeof(uint32_t)*2*THRESHOLD*QUEUE_SIZE+4*SIGNAL_NUM);
+        thread_data->entries_num = (uint32_t*)current_d + 3;
+        transfer_data_t* t = (transfer_data_t*)malloc(sizeof(struct transfer_data_s));
+        t->threadid = bunch;
+        t->buffer = current_d;
+        transfer(t);
+        thread_data->remote_ptr = t->remote_ptr;
+        thread_data->epd = t->epd;
+        epds[bunch] = t->epd;
+        remote_ptrs[bunch] = t->remote_ptr;
+    }else if (threadid > 0){
+        thread_data->remote_ptr = (uint32_t*)((char*)remote_ptrs[bunch]+
+                buffer_size*offset);
+        thread_data->epd = epds[bunch];
+        thread_data->p = (uint64_t*)current_d;
+        thread_data->addr_queue = (uint32_t*)current_d + SIGNAL_NUM;
+        thread_data-> entries= (instr_info_buffer_t*)((char*)current_d + 
+                sizeof(uint32_t)*2*THRESHOLD*QUEUE_SIZE+4*SIGNAL_NUM);
+        thread_data->entries_num = (uint32_t*)current_d + 3;
+    }
+    //(thread_data->p)[4] = 0;//no writing 
+    //*(thread_data->p) = QUEUE_SIZE-1;
+    //cout<<"fin start"<<endl;
+end:
 	PIN_SetThreadData(buf_key, thread_data, threadid);
 }
+
+
+
+
 
 KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool",
 							"o", "inscount.out", "specify output file name");
@@ -468,21 +726,45 @@ KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool",
 // This function is called when the application exits
 VOID Fini(INT32 code, VOID *v) {
 //#ifdef EA_TIMING
-	print_result(OutFile);
+	//print_result(OutFile);
 //#else
 	//long long ea_total_ins = accumulate(easton_ins_num.begin(), easton_ins_num.end(), ea_total_ins);
 	//printf("\n[easton] Total instructions %lld\n", ea_total_ins);
 //#endif
 	// Write to a file since cout and cerr maybe closed by the application
 	OutFile.setf(ios::showbase);
-
+    printf("Fini\n");
     UINT64 total_inst_num_sum = 0;
+    uint32_t* ptr =(uint32_t*)(buffers[0]);
+    *ptr = 0xFFFF;
+    int err;
+    if ((err = scif_writeto(epds[0], (long)ptr, sizeof(uint32_t), 
+            (long)remote_ptrs[0],0 )) <= 0){
+        if (err < 0){
+            printf("scif_send failed with err %d\n", errno);
+            fflush(stdout);
+            exit(1);
+        }
+    }
+    usleep(200);
+    uint64_t actual_sum = 0;
+    uint64_t actual_uop = 0;
     for(UINT32 t = 0; t < numThreads; t++){
         struct thread_data_t* thread_data = (struct thread_data_t*)PIN_GetThreadData(buf_key, t);
-        total_inst_num_sum += thread_data->total_inst_num;
+        if (thread_data != NULL){
+//            cout << "thread "<<t<<" consumes "<<thread_data->time<<endl;
+//            printf("%d\n",t);
+//            cout <<"consumes "<<thread_data->time2<<" total"<<endl;
+            total_inst_num_sum += thread_data->total_inst_num;
+            actual_uop += thread_data->total_uop_num;
+        }
+        if (t==0)
+            actual_sum = thread_data->total_inst_num;
         //OutFile << "Thread[" << t <<"] total_inst_num = "<<thread_data->total_inst_num<<endl;
-    } 
-    cout << "[Calculation-based simulator]-Total x86 Instructions: "<< total_inst_num_sum<<endl;
+    }
+    actual_sum = total_inst_num_sum - actual_sum;
+    cout << "[Calculation-based simulator]-Total x86 Instructions: "
+        << total_inst_num_sum<<" actual sum is: "<<actual_sum<<endl;
 
 	OutFile << "Count " << icount << endl;
 	OutFile << "num_bb " << num_bb << endl;
@@ -496,6 +778,13 @@ VOID Fini(INT32 code, VOID *v) {
 	OutFile << "num missed mem " << num_missed_mem << endl;
 	OutFile << "test addr " << test_addr << endl;
 	OutFile.close();
+    for (int i = 0; i< CTRL_NUM; i++){
+        close(epds[i]);
+        free(buffers[i]);
+    }
+    free(epds);
+    free(remote_ptrs);
+    free(buffers);
 }
 
 /* ===================================================================== */
@@ -514,12 +803,37 @@ int main(int argc, char * argv[]) {
 	for(int i = 0; i < argc; i++) {
 		cout << argv[i] << endl;
 	}
-
+    printf("jxf scif ctrlepd one to one\n");
+    buffer_size = 4*SIGNAL_NUM+THRESHOLD*QUEUE_SIZE*(sizeof(uint32_t)*2) + 
+        NEW_ENTRY*sizeof(instr_info_buffer_t);
+    buffers = (void**)malloc(sizeof(void*)*CTRL_NUM);
+    remote_ptrs = (void**)malloc(sizeof(void*)*CTRL_NUM);
+    epds = (scif_epd_t*)malloc(sizeof(scif_epd_t)*CTRL_NUM);
+    
+    int pagesize = sysconf(_SC_PAGESIZE);
+    len = TRANSFER_BUNCH * buffer_size;
+    len = (len / pagesize+1) * pagesize;
+    printf("len %d\n", len);
+    for (int i = 0; i< CTRL_NUM; i++){
+        void* current_d;
+        int ret = posix_memalign((void **)&current_d, pagesize, len);
+        buffers[i] = current_d;
+        //for each thread buffer, set 0 to q-1, 4 to 0
+        for (int j = 0; j<TRANSFER_BUNCH; j++){
+            uint32_t* c_buffer = (uint32_t*)((char*)current_d + buffer_size*j);
+            /* fence signal is uint64_t*/
+            uint64_t* p = (uint64_t*)c_buffer;
+            *p = QUEUE_SIZE-1;
+            /* if MIC send this to host: */
+            c_buffer[2] = QUEUE_SIZE-1;
+            c_buffer[4] = 0;
+        }
+    }
 	//easton added
 	pthread_mutex_init(&ea_mutex, NULL);
 
 	//init calculation
-	zmf_init();
+	//zmf_init();
 
 	// Initialize pin
 	if(PIN_Init(argc, argv)) return Usage();
@@ -530,6 +844,9 @@ int main(int argc, char * argv[]) {
 		bb_mem_map.push_back(map< ADDRINT, int >());
 	}
 
+    nodes = (uint16_t *)malloc(sizeof(uint16_t)*3);
+    uint16_t self;
+    int num = scif_get_nodeIDs(nodes, 3, &self);
 	InitLock(&lock);
 
 	bufId = PIN_DefineTraceBuffer(sizeof(struct mem_ref), NUM_BUF_PAGES, BufferFull, 0);

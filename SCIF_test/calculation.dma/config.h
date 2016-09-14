@@ -52,15 +52,10 @@ typedef unsigned int word_t;          /* word - 32 bits */
 
 #define CORRECT_RETIRE_BUF_SIZE (64)
 
-#define THRESHOLD (20000)
 #define QUEUE_SIZE (5)
-#define QUEUE_LENGTH (20000 * 2)
-#define NEW_ENTRY (8000)
-#define TRANSFER_BUNCH (2)
-#define SIGNAL_NUM (5)
-#define CTRL_NUM (500)
-
 #define NUM_PROCS (1025)
+#define THRESHOLD (10000)
+
 #define MAX_TRIFS_TRACE_BUF_BLOCK_SIZE (64)
 #define MAX_TRIFS_TRACE_BUF_SIZE (128)
 #define MAX_TRIFS_TRACE_TB_INST_NUM (100)

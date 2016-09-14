@@ -125,10 +125,6 @@ typedef struct {
 /* Function definition(s)                                                   */
 /*------------------------------------------------------------------------*/
 
-extern  x86_instr_info_buffer_t **trifs_trace_shared_buf_head(int core_num);
-extern  x86_instr_info_buffer_t **trifs_trace_shared_tb_inst_buf_head(int core_num);
-extern  x86_mem_info_buffer_t **trifs_mem_shared_buf_head(int core_num);
-extern  instr_info_buffer_flag_t *get_minqh_flag_buf_head(int core_num);
 
 extern "C"
 {
@@ -148,6 +144,11 @@ pseq_t::pseq_t(int id) {
 	m_local_cycles = 0;
 	m_local_instr_count = 0;
 	calculation_wait_num = 0;
+    queue_in = 0;
+    queue_out = 0;
+    entry_queue = (instr_info_buffer_t**)malloc(sizeof(instr_info_buffer_t*)*QUEUE_SIZE);
+    size_queue = (int*)malloc(sizeof(int)*QUEUE_SIZE);
+    t1 = t2 = t3 = 0.0;
 
 #ifdef TRANSFORMER_INORDER
 	minqh_flag_buffer_index = 0;
@@ -172,11 +173,7 @@ pseq_t::pseq_t(int id) {
 	std::cout << "timing mem struct size: " << sizeof(x86_mem_info_buffer_t) << "addr: " << (void *)correct_qemu_mem_info_buf[0] << std::endl;
 	//printf("timing mem struct size: %d %x\n", (int)sizeof(x86_mem_info_buffer_t), (unsigned int)correct_qemu_mem_info_buf[0]);
 	*/
-	pseq_trifs_trace_uops_buf = trifs_trace_uops_global_buf;
-	pseq_trifs_trace_uops_ptr = trifs_trace_uops_global_buf;
 
-	trifs_trace_mem_buf = trifs_trace_mem_global_buf;
-	trifs_trace_mem_ptr = trifs_trace_mem_global_buf;
 
 	code_cache_found = 0;
 	tb_start = 1;
@@ -413,185 +410,14 @@ bool pseq_t::trifs_trace_translate_uops(struct TransOp* uop, instr_info_buffer_t
 	return true;
 }
 
-bool pseq_t::trifs_trace_translate_x86_inst_reset() {
-	memset(&(trifs_trace_uops_buf[0]), 0, 512 * sizeof(struct TransOp));
-	trifs_trace_num_uops = 0;
-	return true;
-}
 
-bool pseq_t::TRANS_inorder_simpleLookupInstruction(instr_info_buffer_t * entry) {
-	vector<instr_info_buffer_t> *uops;
-	if(uops_index <= 0) {
-		while(minqh_flag_buffer[minqh_flag_buffer_index].flag == 0) {
-			//cout << "buffer flag is 0" << endl;
-			return false;
-			if(zmf_finished == true) {
-				printf("Return inside waiting loop.\n");
-				return false;
-			}
-		}
-		/*if(m_id == 1) {*/
-		/*}*/
-		x86_tb_instr_buffer_t *x86_tb_info_entry =
-			&(correct_qemu_tb_instr_buf[minqh_flag_buffer_index][correct_tb_fetch_ptr]);
-		uint64_t tb_addr = x86_tb_info_entry->tb_addr;
-		int tb_fetch_inst_num = x86_tb_info_entry->inst_num;
-		x86_eip = x86_tb_info_entry->x86_eip;
-
-		if(tb_fetch_inst_num) {
-			assert(bb_cache_map.count(tb_addr) == 0);
-			//if(bb_cache_map.count(tb_addr) == 0){
-			//printf("tb_fetch_inst_num is %d\n", tb_fetch_inst_num);
-			fflush(stdout);
-			temp_cache = new code_cache();
-			cur_uop = new instr_info_buffer_t();
-			temp_cache->tb_mem_num = 0;
-			while(tb_fetch_inst_num) {
-				x86_instr_info_buffer_t *x86_info_buf_entry =
-					&(correct_qemu_instr_info_buf[minqh_flag_buffer_index][correct_timing_fetch_ptr]);
-
-				if(x86_info_buf_entry->tb_mem_num) {
-					temp_cache->tb_mem_num = x86_info_buf_entry->tb_mem_num;
-				}
-				unsigned char trifs_trace_x86_buf[MAX_TRIFS_TRACE_X86_BUF_SIZE];
-				memcpy((void *)&trifs_trace_x86_buf, (void *) & (x86_info_buf_entry->x86_inst), MAX_TRIFS_TRACE_X86_BUF_SIZE);
-				uint64_t virt_pc = x86_info_buf_entry->x86_virt_pc;
-				trifs_trace_translate_x86_inst_reset();
-
-				pthread_mutex_lock(&mutex);
-				trifs_trace_ptlsim_decoder(
-					trifs_trace_x86_buf,  16, //trifs_trace_num_bytes
-					trifs_trace_uops_buf, &trifs_trace_num_uops,
-					virt_pc, true);
-				pthread_mutex_unlock(&mutex);
-
-				for(int j = 0; j < trifs_trace_num_uops; j++) {
-					trifs_trace_translate_uops(&trifs_trace_uops_buf[j], cur_uop, virt_pc);
-					(temp_cache->uops).push_back(*cur_uop);
-				}
-				tb_fetch_inst_num--;
-				correct_timing_fetch_ptr++;
-			}
-
-			bb_cache_map[tb_addr] = temp_cache;
-			uops = &(temp_cache->uops);
-			tb_num_uops = uops->size();
-			uops_index = tb_num_uops;
-			delete cur_uop;
-		} else {
-			assert(bb_cache_map.count(tb_addr) == 1);
-			int flag = bb_cache_map.count(tb_addr);
-			if(!flag) {
-				//printf("0x%x not in cache\n", tb_addr);
-				correct_tb_fetch_ptr++;
-				if(correct_tb_fetch_ptr == MAX_TRIFS_TRACE_BUF_SIZE) {
-					//cout << "set buffer flag to 0" << endl;
-					minqh_flag_buffer[minqh_flag_buffer_index].flag = 0;
-					correct_tb_fetch_ptr = 0;
-					correct_timing_fetch_ptr = 0;
-					correct_mem_fetch_ptr = 0;
-					minqh_flag_buffer_index = (minqh_flag_buffer_index + 1) % MAX_TRIFS_TRACE_BUF_BLOCK_SIZE;
-				}
-				return false;
-			}
-
-			temp_cache = bb_cache_map[tb_addr];
-			uops = &(temp_cache->uops);
-			tb_num_uops = uops->size();
-			uops_index = tb_num_uops;
-		}
-
-		if(temp_cache && temp_cache->tb_mem_num) {
-			//printf("mem num is %d\n", temp_cache->tb_mem_num);
-			tb_mem_num = temp_cache->tb_mem_num;
-			trifs_trace_mem_ptr = trifs_trace_mem_buf;
-			trifs_trace_mem_uop_fetch = trifs_trace_mem_buf;
-			same_logical_pc = 0;
-			same_access_size = 0;
-			same_physical_addr = 0;
-		} else {
-			tb_mem_num = 0;
-		}
-
-		while(tb_mem_num) {
-			x86_mem_info_buffer_t *x86_mem_info_buf_entry = &(correct_qemu_mem_info_buf[minqh_flag_buffer_index][correct_mem_fetch_ptr]);
-			trifs_trace_mem_ptr->logical_pc = x86_mem_info_buf_entry->logical_pc;
-			trifs_trace_mem_ptr->m_physical_addr = x86_mem_info_buf_entry->m_physical_addr & 0x1fffffff;
-
-			trifs_trace_mem_ptr++;
-			tb_mem_num--;
-			correct_mem_fetch_ptr++;
-		}
-		correct_tb_fetch_ptr++;
-
-		if(correct_tb_fetch_ptr == MAX_TRIFS_TRACE_BUF_SIZE) {
-			//cout << "set buffer flag to 0" << endl;
-			minqh_flag_buffer[minqh_flag_buffer_index].flag = 0;
-			correct_tb_fetch_ptr = 0;
-			correct_timing_fetch_ptr = 0;
-			correct_mem_fetch_ptr = 0;
-			minqh_flag_buffer_index = (minqh_flag_buffer_index + 1) % MAX_TRIFS_TRACE_BUF_BLOCK_SIZE;
-		}
-	}
-
-	if(tb_num_uops <= 0) {
-		//cout << "tb_num_uops is " << tb_num_uops << endl;
-		return false;
-	}
-	int cache_index = tb_num_uops - uops_index;
-	entry->logical_pc = (temp_cache->uops)[cache_index].logical_pc;
-	entry->m_futype = (temp_cache->uops)[cache_index].m_futype;
-
-	//printf("tb_mem_num is %d\n", temp_cache->tb_mem_num);
-	if(temp_cache->tb_mem_num > 0 && ((entry->m_futype == FU_RDPORT) || (entry->m_futype == FU_WRPORT))) {
-		if(entry->logical_pc == same_logical_pc) {
-			entry->m_physical_addr = same_physical_addr;
-		} else {
-			//fflush(stdout);
-			while(trifs_trace_mem_uop_fetch->logical_pc == same_logical_pc) {
-				trifs_trace_mem_uop_fetch++;
-			}
-			entry->m_physical_addr = trifs_trace_mem_uop_fetch->m_physical_addr;
-			trifs_trace_mem_uop_fetch++;
-		}
-		same_logical_pc = entry->logical_pc;
-		same_physical_addr = entry->m_physical_addr; //*/
-	}
-
-#ifdef TRANSFORMER_MISPREDICTION
-	if(entry->m_futype == FU_BRANCH) {
-		entry->m_branch_result = NO_BRANCH;
-		if(x86_eip == (temp_cache->uops)[cache_index].branch_taken_npc_pc) {
-			entry->m_branch_result = TAKEN;
-		}
-		if(x86_eip == (temp_cache->uops)[cache_index].branch_untaken_npc_pc) {
-			entry->m_branch_result = NOT_TAKEN;
-		}
-	}
-#endif
-	for(int i = 0; i < QEMU_SI_MAX_SOURCE; i++) {
-		entry->m_source_reg[i] = ((temp_cache->uops)[cache_index].m_source_reg[i]) % 16 + 8;
-	}
-	for(int i = 0; i < QEMU_SI_MAX_DEST; i++) {
-		entry->m_dest_reg[i] = ((temp_cache->uops)[cache_index].m_dest_reg[i]) % 16 + 8;
-	}
-	m_next_pc[correct_timing_release_ptr] = entry->logical_pc;
-	//cout << "m_next pc is " << entry->logical_pc << endl;
-	m_next_fu_type[correct_timing_release_ptr] = entry->m_futype;
-	correct_timing_release_ptr = (correct_timing_release_ptr + 1) % CORRECT_RETIRE_BUF_SIZE;
-	uops_index--;
-	return true;
-}
-
-bool pseq_t::m_calculate(vector< instr_info_buffer_t > &entries, unsigned int& entry_index) {
+bool pseq_t::m_calculate(instr_info_buffer_t* entries, uint32_t* queue, unsigned int& entry_index, int length) {
 	int phy_proc = m_id;
-	if(phy_proc < 0 || phy_proc >= NUM_PROCS) {
-		printf("core is %d\tpseq_t addr is %p\n", phy_proc, this);
-	}
-	assert(phy_proc >= 0 && phy_proc < NUM_PROCS);
-    int e_size = entries.size();
+    struct timeval s1, s2, s3, s4;
 	// If pipeline is stalled, we do not fetch and just return
+//	gettimeofday(&s1, 0);
 	if(m_inorder_x86_retire_info.inorder_skip_cycle > 0) {
+#pragma ivdep
 		for(uint64_t tt = 0; tt < m_inorder_x86_retire_info.inorder_skip_cycle; tt++) {
 			uint64_t offset = m_local_cycles % INORDER_MAX_ESTIMATE_INST_NUM;
 			assert(offset >= 0 && offset < INORDER_MAX_ESTIMATE_INST_NUM);
@@ -602,7 +428,7 @@ bool pseq_t::m_calculate(vector< instr_info_buffer_t > &entries, unsigned int& e
 			m_local_cycles++;
 		}
 	}
-
+    //printf("in cal\n");
 	int inorder_dispatch_inst_count = MAX_FETCH; //pipeline width: process MAX_FETCH instrctions simultaneously
 	bool fetch_ok = true;
 	m_inorder_x86_retire_info.inorder_skip_cycle = 1;
@@ -615,11 +441,14 @@ bool pseq_t::m_calculate(vector< instr_info_buffer_t > &entries, unsigned int& e
 			instr_info_buffer_t entry;
 
 			//fetch_ok = TRANS_inorder_simpleLookupInstruction(&entry);
-			//cout << "entry index is " << entry_index << "\tentries size is " << entries.size() << endl;
-			if(entry_index < e_size) {
-				assert(entry_index < entries.size());
+			//cout << "entry index is " << entry_index << "\tentries size is " << length << endl;
+			if(entry_index < length) {
+				assert(entry_index < length);
 				fetch_ok = true;
-				entry = entries[entry_index++]; //fetch an instrction
+                uint32_t p = queue[entry_index];
+				entry = entries[p]; //fetch an instrction
+                entry.m_physical_addr = queue[entry_index+1];
+                entry_index += 2;
 				assert(correct_timing_release_ptr >= 0 && correct_timing_release_ptr < CORRECT_RETIRE_BUF_SIZE);
 				m_next_pc[correct_timing_release_ptr] = entry.logical_pc;
 				//cout << "correct_timing_release_ptr" << correct_timing_release_ptr <<
@@ -911,12 +740,16 @@ bool pseq_t::m_calculate(vector< instr_info_buffer_t > &entries, unsigned int& e
 		}
 		uint64_t offset = m_local_cycles % INORDER_MAX_ESTIMATE_INST_NUM;
 		m_inorder_execute_inst_width[offset] = 0;
+#pragma ivdep
 		for(int mm = 0; mm < FU_NUM_FU_TYPES; mm++) {
 			m_inorder_function_unit_width[offset][mm] = 0;
 		}
 		m_local_cycles++;
 		m_inorder_x86_retire_info.inorder_skip_cycle--;
 	}
+//	gettimeofday(&s3, 0);
+//    t1 += 1000000 * (s2.tv_sec - s1.tv_sec) + s2.tv_usec - s1.tv_usec;
+//    t2 += 1000000 * (s3.tv_sec - s2.tv_sec) + s3.tv_usec - s2.tv_usec;
 	//#endif
 	return fetch_ok;
 }
@@ -953,7 +786,6 @@ int transformer_inorder_qemu_function(int first_phy_proc) {
 	}
 }
 
-extern int max_tb_per_exec;
 int total_max_tb_per_exec;
 
 void * transformer_inorder_qemu_function_thread(void * arg) {
@@ -1297,10 +1129,10 @@ void stepInorder() {
 	}
 }
 
-void do_cal(int core_num, vector< instr_info_buffer_t > &entries) {
-	assert(core_num >= 0 && core_num < NUM_PROCS);
+void do_cal(int core_num, instr_info_buffer_t* entries, uint32_t* queue, int length) {
+	assert(core_num >= 0 );
 	//assert(m_seq[core_num]->m_inorder_fetch_rob_count == 0);
-	//cout << "entires size is " << entries.size() << endl;
+	//cout << "entires size is " << length << endl;
 	//cout << "m_inorder_fetch_rob_count is " << m_seq[core_num]->m_inorder_fetch_rob_count << endl;
 	unsigned int index = 0;
 
@@ -1308,125 +1140,364 @@ void do_cal(int core_num, vector< instr_info_buffer_t > &entries) {
 #ifdef ACCURACY_TEST
 			printf("outer loop\n");
 #endif
-	        bool exit_flag = m_seq[core_num]->m_calculate(entries, index);
+	        bool exit_flag = m_seq[core_num]->m_calculate(entries, queue, index, length);
 			if(!exit_flag) {
 				break;
 			}
 		}
 }
-extern TLS_KEY  buf_key;
-extern int queue_size;
 
-//VOID cal_buffer(VOID* vargp){
-//    __attribute ((target(mic)))    int tid = (long int)vargp;
+//void* cal_buffer(void* vargp){
+//    int tid = (long int)vargp;
 //    
 //    //pthread_detach(pthread_self());
 //    int signo;
 //    printf("thread start %d\n", tid);
-//    while(1){
+//    while(tid != 0){
 //        //sigwait(&sigmask,&signo);
-//        if (queue_out[tid] != -1){
-//	struct thread_data_t *thread_data = (struct thread_data_t*)PIN_GetThreadData(buf_key, tid*2);
-//    vector<instr_info_buffer_t> entry1, entry2;
-//    int i = 0;
-//            while ((queue_out[tid ]) %queue_size != queue_in[tid] ){
-//                vector<instr_info_buffer_t> *entries = thread_data->entry_queue[queue_out[tid]];
+//        if (m_seq[tid]->queue_in != -1){
+//            while (m_seq[tid]->queue_out %QUEUE_SIZE != m_seq[tid]->queue_in ){
+//                int out = m_seq[tid]->queue_out;
+//                instr_info_buffer_t* entries = m_seq[tid]->entry_queue[out];
+//                int length = m_seq[tid]->size_queue[out]; 
 ////                do_cal(tid, *entry_queue[tid][queue_out[tid]]);
 ////                if (i % 2 = 0dd)
-////#pragma offload_transfer target(mic:0) in(entry1) 
-////#pragma offload_wait target(mic:0) wait(*entry)
-////#pragma offload target(mic:-1) in(*entries) 
-//                {
-//                do_cal(tid, *entries);
-//                }
+//                do_cal(tid, entries, length);
+//                free(entries);
 //                //cout <<"after size "<<  entry_queue[tid][queue_out[tid]]<<endl;
-//                queue_out[tid] = (queue_out[tid]+1) % queue_size;
+//                m_seq[tid]->queue_out = (out+1) % QUEUE_SIZE;
 //            }
 //
 //            
 //	//PIN_SetThreadData(buf_key, thread_data, threadid);
 //            //printf("%d %d\n",queue_out[tid], queue_in[tid]);
 //        }else 
-//            PIN_ExitThread(0);
+//            return NULL;
 //    }
 //}
+//
+//void send_sig(int core_num, instr_info_buffer_t *entries, int length, int* size_count){
+//    //cout <<"before "<< entries->size() << endl;
+//    //if ((queue_out[core_num ]-1) %queue_size == queue_in[core_num] )
+//    //    cout<<" queue full "<<core_num<<endl;
+//    int in = m_seq[core_num]->queue_in;
+////    while ((m_seq[core_num]->queue_out-1) % QUEUE_SIZE == in )
+////        sleep(1);
+//    if ((m_seq[core_num]->queue_out-1) % QUEUE_SIZE == in ){
+//        free(entries);
+//        (*size_count)++;
+//        printf("omit in %d\n", core_num);
+//        return;
+//    }
+//    m_seq[core_num]->entry_queue[in] = entries;
+//    m_seq[core_num]->size_queue[in] = length;
+//    m_seq[core_num]->queue_in = (in +1) % QUEUE_SIZE;
+//    //cout <<"af "<< entries->size() << endl;
+//    //printf("send %d :%d %d\n",core_num, queue_out[core_num],queue_in[core_num]);
+//    //pthread_kill(pid, SIGUSER1);
+//}
+void ** remote_ptr;
+int* newepd;
+uint32_t** buffers;
+int total_num = 0;
 
+void* listen_msg(void* vargp){
+    int tid = ((transfer_data_t*)vargp)->threadid;
+    uint32_t* buffer = ((transfer_data_t*)vargp)->buffer;
+    uint64_t offset = ((transfer_data_t*)vargp)->offset;
+    instr_info_buffer_t* recvdata = (instr_info_buffer_t*)buffer;
+    int epd;
+    int buffer_size;
+    int err = 0;
+    int bid = (tid-1) / TRANSFER_BUNCH;
 
+    printf("tid %d\n",tid);
+    if ((tid-1) % TRANSFER_BUNCH == 0){
+        int req_pn = 3000+(tid-1)/TRANSFER_BUNCH;
+        int con_pn;
+        int backlog = 16;
+        struct scif_portID portID;
+        int block = 1;
+        portID.node = 2;
+        portID.port = 3000+tid;
+        int pagesize = sysconf(_SC_PAGESIZE);
+        buffer_size = 4*SIGNAL_NUM+THRESHOLD*QUEUE_SIZE*(sizeof(uint32_t)*2) + 
+            NEW_ENTRY*sizeof(instr_info_buffer_t);
+        int len = buffer_size*TRANSFER_BUNCH;
+        len = (len / pagesize+1) * pagesize;
+        if ((epd = scif_open()) < 0){
+            printf("scif_open fialed with error %d in %d\n", errno, tid);
+            return NULL;
+        }
+        printf("scif_bind to port %d\n",req_pn);
+        if ((con_pn = scif_bind(epd, req_pn)) < 0){
+            printf("scif_bind failed with erro %d in %d\n", errno, tid);
+            return NULL;
+        }
+        printf("scif_listen with backlog of 16\n");
+        if ((scif_listen(epd, backlog)) < 0){
+            printf("scif_listen faield with error %d in %d\n", errno, tid);
+            return NULL;
+        }
+        printf("scif_accept in syncronous model\n");
+        if (((scif_accept(epd, &portID, &newepd[bid], SCIF_ACCEPT_SYNC))<0) && (errno != EAGAIN)){
+            printf("scif_accept failed with errno %d in %d\n", errno, tid);
+            return NULL;
+        }
+        if (SCIF_REGISTER_FAILED == scif_register (newepd[bid], (void *)recvdata, len, (long)recvdata, SCIF_PROT_READ | SCIF_PROT_WRITE, SCIF_MAP_FIXED)){
+            printf("scif register failed with err %d in %d\n", errno, tid);
+        }
+        scif_send(newepd[bid], &recvdata, sizeof(void*), SCIF_SEND_BLOCK);
+        scif_recv(newepd[bid], &remote_ptr[bid],sizeof(void*), SCIF_RECV_BLOCK);
+        printf("scif_accept complete %lx\n",remote_ptr[bid]);
+        printf("node = %d, port = %d\n", portID.node, portID.port);
+        scif_close(newepd[bid]);
+        scif_close(epd);
+        return;
+    }
+    return;
+    int* skip_count = (int *)calloc(1, sizeof(int));
 
-void zmf_init() {
-	printf("ZMF_init: cpu_count=%d\n", NUM_PROCS);
-	m_seq = (pseq_t **)malloc(NUM_PROCS * sizeof(pseq_t *));
+    
+    uint32_t *remote_cur = (uint32_t *)((char*)remote_ptr[bid]+offset) + 1;
+    /* *p signal stand for the latest queue that the host already sent 
+     * MIC will read from it */
+    uint64_t volatile *p = (uint64_t volatile *)recvdata;
+    *p = QUEUE_SIZE-1;
+
+    /* *cur signal stand for the latest queue that calculation already processed 
+     * MIC will write to it */
+    uint32_t volatile *cur = (uint32_t volatile *)recvdata + 2;
+    *cur = QUEUE_SIZE-1;
+
+    uint32_t volatile *ent = (uint32_t volatile *)recvdata + 3;
+    *ent = 0;
+    
+    uint32_t* addr_queue = (uint32_t*)recvdata + SIGNAL_NUM;
+    instr_info_buffer_t* entries= (instr_info_buffer_t*)((char*)recvdata + sizeof(uint32_t)*2*THRESHOLD*QUEUE_SIZE+SIGNAL_NUM*4);
+    /* the current queue that MIC processes, *cur will sync with this*/
+    uint32_t current_p = QUEUE_SIZE-1;
+    int ini = 1;
+    double timeuse = 0.0;
+    double total_timeuse = 0.0, c_time = 0.0;
+    uint64_t entry_count = 0;
+    struct timeval starttime, endtime, total_start, total_end, c_s, c_e; 
+    struct timeval s_times[5];
+    struct timeval e_times[5];
+    double t_times[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    while (1){
+		gettimeofday(&starttime, 0);
+        int c = 0;
+        while (*p == current_p){
+            usleep(5);
+//            _mm_delay_64(2000);
+//            c++;
+        }
+		gettimeofday(&endtime, 0);
+//        if (tid ==1) printf("tid %d\n",*p);
+        if (*p == 0xFFFF || *p >= QUEUE_SIZE)
+            goto close;
+        if (ini == 0){
+	        timeuse += 1000000 * (endtime.tv_sec - starttime.tv_sec) + 
+                endtime.tv_usec - starttime.tv_usec;
+//            if (timeuse > 2000 && c >1)
+//                printf("wait %d using %.2f in thread %d after %ld\n", 
+//                        c, timeuse, tid, entry_count);
+        }else {
+//        if (ini != 0){
+            gettimeofday(&total_start, 0);
+//            remote_cur = (uint64_t *)((char*)remote_ptr[bid]+offset) + 1;
+//            printf("remote %d %lx\n",tid,remote_cur);
+        }
+        //cout << "queue end  "<<*p<<endl;
         
-    sigemptyset(&sigmask);
-    sigaddset(&sigmask,SIGUSER1);
-    sigaddset(&sigmask,SIGUSER2);
-	
-    entry_queue = (vector< instr_info_buffer_t > ***)malloc(NUM_PROCS*sizeof(vector< instr_info_buffer_t >**));
-    queue_in = (int*)malloc(sizeof(int)*NUM_PROCS);
-    queue_out = (int*)malloc(sizeof(int)*NUM_PROCS);
-    int global_cpu_count = NUM_PROCS;
+        current_p = (current_p+1) % QUEUE_SIZE;
+        err = 0;
+//        printf("entries num %d\n",*ent);
+        uint32_t* current_queue = addr_queue+ THRESHOLD*2* current_p;
+        uint32_t length = *current_queue; 
+        entry_count += length;
+        //cout << "length "<<length<<" "<<current_p<<endl;
+        //print the data from the tail of the queue, the data might be broken
+//        printf("process %d %d end %lx %lx front %ld %ld\n",tid, current_p,
+//                current_queue[length-1],current_queue[length], length, 
+//                entries[current_queue[1]].logical_pc);
+//		gettimeofday(&c_s, 0);
+//        do_cal(tid, entries, current_queue+1, length);
+//		gettimeofday(&c_e, 0);
+//	    c_time += 1000000 * (c_e.tv_sec - c_s.tv_sec) + 
+//            c_e.tv_usec - c_s.tv_usec;
+//        printf("fininsh\n");
+        *cur = current_p;
+//        printf("cur %d\n", *cur);
+//		gettimeofday(&s_times[0], 0);
+//        if ((err = scif_writeto(newepd[bid], (long)cur, sizeof(uint64_t), 
+//                        (long)remote_cur,0 )) <= 0){
+//            if (err < 0){
+//                printf("scif_writeto cur failed with err %d\ 
+//                        in thread %d\n", errno, tid);
+//                fflush(stdout);exit(1);
+//            }
+//        }
+//		gettimeofday(&e_times[0], 0);
+//	    t_times[0] += 1000000 * (e_times[0].tv_sec - s_times[0].tv_sec) + 
+//            e_times[0].tv_usec - s_times[0].tv_usec;
+        ini = 0;
+	    gettimeofday(&total_end, 0);
+        //free(copydata);
+        
+        err = 0;
+    }
+close:
+    total_timeuse += 1000000 * (total_end.tv_sec - total_start.tv_sec) + 
+        total_end.tv_usec - total_start.tv_usec;
+	gettimeofday(&e_times[0], 0);
+    t_times[0] += 1000000 * (e_times[0].tv_sec - total_end.tv_sec) + 
+        e_times[0].tv_usec - total_end.tv_usec;
 
-	for(int i = 0; i < NUM_PROCS; i++) {
+    if (tid == 1){
+        int t_b = total_num / TRANSFER_BUNCH;
+        for (int j = 0; j < t_b; j++){
+            uint32_t* c_buffer = buffers[j];
+            for (int i = 0; i< TRANSFER_BUNCH;i++){
+                *(uint32_t*)((char*)c_buffer + i*buffer_size) = 0xFFFF;
+            }
+            
+        }
+        scif_close(newepd[bid]);
+        scif_close(epd);
+    }
+    free(skip_count);
+    fflush(stdout);
+    fflush(stdout);
+    if (err)
+        printf("Test failed\n");
+    printf("total_time %.2f wait %.2f cal %.2f tail %.2f\t entry %ld in thread %d\n", 
+            total_timeuse, timeuse, c_time,t_times[0], entry_count, tid);
+    return NULL;
+
+}
+
+
+void generateServer(int core_num){
+//    cpu_set_t mask;
+//    cpu_set_t get;
+    total_num = core_num-1;
+    int bunch = (core_num-1 )/ TRANSFER_BUNCH;
+    int pagesize = sysconf(_SC_PAGESIZE);
+    // len = (1000*48) + (12 * 1000)*50 + payload = 4096 * 160 
+    uint64_t buffer_size = 4*SIGNAL_NUM+THRESHOLD*QUEUE_SIZE*(sizeof(uint32_t)*2) + 
+        NEW_ENTRY*sizeof(instr_info_buffer_t);
+    int len = buffer_size*TRANSFER_BUNCH;
+    len = (len / pagesize+1) * pagesize;
+    printf("len %d page %d instr %d int %d\n", len, pagesize,
+            sizeof(instr_info_buffer_t), sizeof(int));
+    buffers = (uint32_t**)malloc(sizeof(uint32_t*)*bunch); 
+    remote_ptr = (void**)malloc(sizeof(void*)*bunch); 
+    newepd = (int*)malloc(sizeof(int)*bunch); 
+    for (int i = 0; i< bunch; i++){
+
+        int ret = posix_memalign((void**) &buffers[i], pagesize, len);
+
+        printf("buff %d\n", *(uint32_t*)buffers[i]);
+        if (ret) {
+            printf("could not allocate\n");
+            return;
+        }
+    }
+    pthread_t* pids = (pthread_t*)malloc(sizeof(pthread_t)*(core_num+1));
+//    pthread_t* pids_cal = (pthread_t*)malloc(sizeof(pthread_t)*(core_num+1));
+    int err;
+    for (int i = 1; i< core_num; i++){
+//        CPU_ZERO(&mask);
+//        CPU_SET(i%60, &mask);
+        int no = (i -1)/ TRANSFER_BUNCH;
+        int offset = (i-1)% TRANSFER_BUNCH;
+        transfer_data_t* t = (transfer_data_t*)malloc(sizeof(struct transfer_data_s));
+        t->threadid = i;
+        t->buffer = (uint32_t*)((char*)(buffers[no])+offset*buffer_size);
+        t->offset = offset*buffer_size;
+        err = pthread_create(pids+i, NULL, listen_msg, (void*)t);
+//        err = pthread_setaffinity_np(pids[i], sizeof(mask), &mask);
+//        err = pthread_create(pids_cal+i,NULL, cal_buffer, (void*)i);
+    }
+    for (int i = 1; i< core_num; i++){
+        pthread_join(pids[i], NULL);
+//        pthread_join(pids_cal[i], NULL);
+    } 
+    for (int i = 0; i< bunch; i++){
+        free(buffers[i]);
+    }
+    return;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2){
+        exit(1);
+    }
+    int core_num = atoi(argv[1]) +1;
+	printf("ZMF_init: cpu_count=%d\n", core_num);
+	m_seq = (pseq_t **)malloc(core_num * sizeof(pseq_t *));
+        
+    int global_cpu_count = core_num;
+
+	for(int i = 0; i < core_num; i++) {
 		m_seq[i] = new pseq_t(i);
 		printf("pseq_t addr is %p, m_id is %d\n", m_seq[i], m_seq[i]->m_id);
+        printf("%d\n", sizeof(pseq_t));
 	}
 	stepInorder();
+    generateServer(core_num);
+    print_result(core_num);
+    return 0;
 }
 
 void calculation_hello() {
 	std::cout << "inside calculation" << std::endl;
 }
 
-void print_result(ostream & OutFile) {
+void print_result(int core_num) {
 #ifdef TRANSFORMER_USE_CACHE_COHERENCE
 	CAT_pseudo_dump_coherence_stat();
 #endif
+//	printf("\n[Calculation-based simulator]-Process Time: \n");
+//	for(int j = 0; j < core_num; j++) {
+//		printf("%.2f %.2f %.2f\n", m_seq[j]->t1, m_seq[j]->t2, m_seq[j]->t3);
+//	}
 	printf("\n[Calculation-based simulator]-Wait_Number: ");
-	OutFile << endl << "[Calculation-based simulator]-Wait_Number: ";
-	for(int j = 0; j < NUM_PROCS; j++) {
+	for(int j = 0; j < core_num; j++) {
 		printf("\t%ld", m_seq[j]->inorder_wait_num);
-		OutFile << "\t" << m_seq[j]->inorder_wait_num;
 	}
 	printf("\n[Calculation-based simulator]-Instructions: ");
-	OutFile << endl << "[Calculation-based simulator]-Instructions: ";
 	uint64_t minqh_total_instr = 0;
-	for(int j = 0; j < NUM_PROCS; j++) {
+	for(int j = 0; j < core_num; j++) {
 		printf("\t%ld", m_seq[j]->m_local_instr_count);
-		OutFile << "\t" << m_seq[j]->m_local_instr_count;
 		minqh_total_instr += m_seq[j]->m_local_instr_count;
 	}
 	printf("\n[Calculation-based simulator]-Total instructions %ld\n", minqh_total_instr);
-	OutFile << endl << "[Calculation-based simulator]-Total instructions " << minqh_total_instr << endl;
 
     printf("[Calculation-based simulator]-Cycles: ");
-	OutFile << "[Calculation-based simulator]-Cycles: ";
     uint64_t jxf_total_cycle = 0;
-	for(int j = 0; j < NUM_PROCS; j++) {
+	for(int j = 0; j < core_num; j++) {
 #ifdef PARALLIZED_SHARED_CACHE
 		printf("\t%ld", *(m_seq[j]->L2_hit_increase_back));
-		OutFile << "\t" << *(m_seq[j]->L2_hit_increase_back);
 		printf("\t%ld", (m_seq[j]->m_local_cycles - * (m_seq[j]->L2_hit_increase_back) * INORDER_MEMORY_LATENCY));
-		OutFile << "\t" << (m_seq[j]->m_local_cycles - * (m_seq[j]->L2_hit_increase_back) * INORDER_MEMORY_LATENCY);
 #else
         jxf_total_cycle += m_seq[j]->m_local_cycles;
 		printf("\t%ld", m_seq[j]->m_local_cycles);
-		OutFile << "\t" << m_seq[j]->m_local_cycles;
 #endif
 	}
 	printf("\n[Calculation-based simulator]-Total cycles %ld\n", jxf_total_cycle);
-	OutFile << endl << "[Calculation-based simulator]-Total instructions " << jxf_total_cycle << endl;
 
 #ifdef TRANSFORMER_INORDER_BRANCH
 	uint64_t total_inorder_branch_count = 0;
 	uint64_t total_inorder_branch_misprediction_count = 0;
-	for(int j = 0; j < NUM_PROCS; j++) {
+	for(int j = 0; j < core_num; j++) {
 		total_inorder_branch_count += m_seq[j]->inorder_branch_count;
 		total_inorder_branch_misprediction_count += m_seq[j]->inorder_branch_misprediction_count;
 	}
 	printf("[Calculation-based simulator]-Branches: Total %ld  Mispred %ld  Mispred-Percentage %0.2f\n",
 		   total_inorder_branch_count, total_inorder_branch_misprediction_count, total_inorder_branch_misprediction_count / (total_inorder_branch_count + 0.0) * 100);
-	OutFile << "[Calculation-based simulator]-Branches: Total " << total_inorder_branch_count <<  " Mispred " << total_inorder_branch_misprediction_count <<
-			" Mispred-Percentage " << total_inorder_branch_misprediction_count / (total_inorder_branch_count + 0.0) * 100 << endl;
 #endif
 
 #ifdef TRANSFORMER_INORDER_CACHE
@@ -1436,7 +1507,7 @@ void print_result(ostream & OutFile) {
 	uint64_t total_l1_dcache_miss_count = 0;
 	uint64_t total_l2_dcache_hit_count = 0;
 	uint64_t total_l2_dcache_miss_count = 0;
-	for(int j = 0; j < NUM_PROCS; j++) {
+	for(int j = 0; j < core_num; j++) {
 		total_inorder_l1_icache_hit_count += m_seq[j]->inorder_l1_icache_hit_count;
 		total_inorder_l1_icache_miss_count += m_seq[j]->inorder_l1_icache_miss_count;
 		total_l1_dcache_hit_count += m_seq[j]->inorder_l1_dcache_hit_count;
@@ -1451,16 +1522,11 @@ void print_result(ostream & OutFile) {
 	printf("[Calculation-based simulator]-Caches: L1-I hit %ld miss %ld L1-D hit %ld miss %ld L2 hit %ld miss %ld \n",
 		   total_inorder_l1_icache_hit_count, total_inorder_l1_icache_miss_count, total_l1_dcache_hit_count, total_l1_dcache_miss_count,
 		   total_l2_dcache_hit_count, total_l2_dcache_miss_count);
-	OutFile << "[Calculation-based simulator]-Caches: L1-I hit " << total_inorder_l1_icache_hit_count
-			<< " miss " << total_inorder_l1_icache_miss_count << " L1-D hit " << total_l1_dcache_hit_count << " miss " << total_l1_dcache_miss_count
-			<< " L2 hit " << total_l2_dcache_hit_count << " miss " << total_l2_dcache_miss_count << endl;
 #endif
 
 
 	printf("[Calculation-based simulator] Simulation terminates.\n");
-	OutFile << "[Calculation-based simulator] Simulation terminates." << endl;
 	printf("[Calculation-based simulator] Goodbye.Pin JXF!!!\n");
-	OutFile << "[Calculation-based simulator] Goodbye." << endl;
 
 	fflush(stdout);
 	fflush(stderr);

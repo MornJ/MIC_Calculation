@@ -48,19 +48,15 @@ typedef unsigned int word_t;          /* word - 32 bits */
 #define INORDER_MISPREDICTION_LATENCY (3)
 
 #define INORDER_MAX_STALL_INST_NUM IWINDOW_WIN_SIZE
-#define INORDER_MAX_ESTIMATE_INST_NUM (1 << 20)
+#define INORDER_MAX_ESTIMATE_INST_NUM (1 << 12)
 
 #define CORRECT_RETIRE_BUF_SIZE (64)
 
-#define THRESHOLD (20000)
 #define QUEUE_SIZE (5)
-#define QUEUE_LENGTH (20000 * 2)
-#define NEW_ENTRY (8000)
-#define TRANSFER_BUNCH (2)
-#define SIGNAL_NUM (5)
-#define CTRL_NUM (500)
-
+#define THRESHOLD (20000)
 #define NUM_PROCS (1025)
+#define NEW_ENTRY (8000)
+
 #define MAX_TRIFS_TRACE_BUF_BLOCK_SIZE (64)
 #define MAX_TRIFS_TRACE_BUF_SIZE (128)
 #define MAX_TRIFS_TRACE_TB_INST_NUM (100)
